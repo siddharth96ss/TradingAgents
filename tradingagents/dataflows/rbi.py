@@ -169,8 +169,11 @@ def _fetch_mospi_data(dataset: str, filters: dict) -> dict:
     """Fetch data from MOSPI via esankhyiki."""
     try:
         import esankhyiki
+        import warnings
 
-        result = esankhyiki.get_data(dataset, filters, format="dict")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = esankhyiki.get_data(dataset, filters, format="dict")
         return result
     except ImportError as exc:
         raise RbiNotConfiguredError(
