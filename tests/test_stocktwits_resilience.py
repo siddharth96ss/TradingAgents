@@ -60,6 +60,11 @@ class TestStockTwitsCryptoSymbols:
             ("BRK-B", "BRK-B"),       # dashed class share: untouched
             ("GOLD", "GOLD"),         # real equity (aliases elsewhere): untouched here
             ("XYZ-USD", "XYZ-USD"),   # unknown base: not treated as crypto
+            ("RELIANCE.NS", "RELIANCE.NSE"),   # Yahoo NSE suffix → StockTwits
+            ("JUBLCPL.NS", "JUBLCPL.NSE"),     # Yahoo NSE suffix → StockTwits
+            ("TCS.NS", "TCS.NSE"),             # Yahoo NSE suffix → StockTwits
+            ("RELIANCE.NSE", "RELIANCE.NSE"),   # already correct: no change
+            ("RELIANCE.BO", "RELIANCE.BO"),     # BSE suffix: untouched
         ],
     )
     def test_symbol_mapping(self, ticker, expected):

@@ -18,7 +18,9 @@ from .errors import (
     VendorRateLimitError,
 )
 from .fred import get_macro_data as get_fred_macro_data
+from .india_detection import is_indian_stock
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
+from .rbi import INDIA_MACRO_SERIES, get_macro_data as get_rbi_macro_data
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -28,6 +30,7 @@ from .y_finance import (
     get_stock_stats_indicators_window,
     get_YFin_data_online,
 )
+from .groww_news import get_global_news as get_groww_global_news, get_news as get_groww_news
 from .yfinance_news import get_global_news_yfinance, get_news_yfinance
 
 logger = logging.getLogger(__name__)
@@ -82,6 +85,7 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "groww",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -124,10 +128,12 @@ VENDOR_METHODS = {
     "get_news": {
         "alpha_vantage": get_alpha_vantage_news,
         "yfinance": get_news_yfinance,
+        "groww": get_groww_news,
     },
     "get_global_news": {
         "yfinance": get_global_news_yfinance,
         "alpha_vantage": get_alpha_vantage_global_news,
+        "groww": get_groww_global_news,
     },
     "get_insider_transactions": {
         "alpha_vantage": get_alpha_vantage_insider_transactions,
@@ -136,6 +142,7 @@ VENDOR_METHODS = {
     # macro_data
     "get_macro_indicators": {
         "fred": get_fred_macro_data,
+        "rbi": get_rbi_macro_data,
     },
     # prediction_markets
     "get_prediction_markets": {
@@ -192,14 +199,50 @@ def route_to_vendor(method: str, *args, **kwargs):
     else:
         vendor_chain = all_available_vendors
 
+    # ── Ticker-aware routing for macro_data ──────────────────────────────
+    # When analyzing an Indian stock (.NS/.BO or detected via yfinance
+    # exchange), Indian-specific macro indicators route to the RBI vendor
+    # first, with FRED as fallback.  Global indicators (fed_funds_rate,
+    # oil, etc.) still go to FRED even for Indian stocks.
+    if method == "get_macro_indicators":
+        ticker = kwargs.get("ticker")
+        indicator = args[0] if args else kwargs.get("indicator", "")
+        if ticker and is_indian_stock(ticker):
+            indicator_key = indicator.strip().lower().replace(" ", "_").replace("-", "_")
+            if indicator_key in INDIA_MACRO_SERIES and "rbi" in vendor_chain:
+                # Indian indicator for an Indian stock → RBI first
+                vendor_chain = ["rbi"] + [v for v in vendor_chain if v != "rbi"]
+                logger.info(
+                    "Indian stock %r detected; routing macro indicator %r to RBI vendor.",
+                    ticker, indicator,
+                )
+
+    # ── Ticker-aware routing for news_data ──────────────────────────────
+    # When analyzing an Indian stock (.NS/.BO or detected via yfinance
+    # exchange), news routes to Groww first (Indian-focused news source),
+    # with yfinance as fallback.  Non-Indian stocks continue using the
+    # configured vendor chain.
+    if method in ("get_news", "get_global_news"):
+        ticker = kwargs.get("ticker")
+        if ticker and is_indian_stock(ticker) and "groww" in vendor_chain:
+            # Indian stock news → Groww first
+            vendor_chain = ["groww"] + [v for v in vendor_chain if v != "groww"]
+            logger.info(
+                "Indian stock %r detected; routing news to Groww vendor.",
+                ticker,
+            )
+
     last_no_data: NoMarketDataError | None = None
     first_error: Exception | None = None
+    # Strip routing-only kwargs (e.g. "ticker") before passing to vendor
+    # implementations — they don't accept it.
+    vendor_kwargs = {k: v for k, v in kwargs.items() if k != "ticker"}
     for vendor in vendor_chain:
         vendor_impl = VENDOR_METHODS[method][vendor]
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
 
         try:
-            return impl_func(*args, **kwargs)
+            return impl_func(*args, **vendor_kwargs)
         except VendorRateLimitError:
             logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
             continue
