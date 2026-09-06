@@ -22,6 +22,19 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+def _ensure_indian_suffix(ticker: str) -> str:
+    """Append .NS suffix to bare Indian stock tickers for Yahoo Finance.
+
+    The stock scanner returns bare tickers (e.g. "RELIANCE") but Yahoo
+    Finance requires the exchange suffix (e.g. "RELIANCE.NS") for Indian
+    NSE stocks.  Tickers that already carry a suffix are returned as-is.
+    """
+    upper = ticker.upper()
+    if upper.endswith((".NS", ".BO", ".NSE")):
+        return ticker
+    return f"{ticker}.NS"
+
+
 def _extract_from_markdown(text: str, pattern: str) -> Optional[str]:
     """Extract a value from markdown like **Key**: Value."""
     match = re.search(rf"\*\*{pattern}\*\*:\s*(.+)", text, re.IGNORECASE)
@@ -217,7 +230,7 @@ def run_daily_scan(
             min_score=2.0,
             max_stocks=max_daily,
         )
-        stocks = [item["ticker"] for item in buy_list]
+        stocks = [_ensure_indian_suffix(item["ticker"]) for item in buy_list]
         logger.info("Multi-signal scanner returned %d BUY+ stocks", len(stocks))
     except Exception as exc:
         logger.warning("Multi-signal scanner failed, falling back to sector momentum: %s", exc)
