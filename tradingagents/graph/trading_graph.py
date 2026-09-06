@@ -428,6 +428,39 @@ class TradingAgentsGraph:
                 checkpoint_thread_id=thread_id_value,
             )
 
+    def stream_propagate(self, company_name, trade_date, asset_type: str = "stock"):
+        """Yield (state_chunk, node_name) as the graph executes.
+
+        Like :meth:`propagate` but streams intermediate state updates instead
+        of returning only the final result.  The batch runner uses this to
+        capture partial state for live report generation.
+        """
+        self.ticker = company_name
+        self._resolve_pending_entries(company_name)
+
+        past_context = self.memory_log.get_past_context(
+            company_name, as_of=self._memory_as_of(trade_date)
+        )
+        instrument_context = self.resolve_instrument_context(company_name, asset_type)
+        init_agent_state = self.propagator.create_initial_state(
+            company_name,
+            trade_date,
+            asset_type=asset_type,
+            past_context=past_context,
+            instrument_context=instrument_context,
+        )
+
+        with self.checkpoint_scope(company_name, trade_date, asset_type) as thread_id_value:
+            args = self.propagator.get_graph_args()
+            if thread_id_value is not None:
+                args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = thread_id_value
+
+            graph_input = self.checkpoint_input(init_agent_state)
+            for chunk in self.graph.stream(graph_input, **args):
+                # Each chunk is a dict with a single key = node name
+                node_name = list(chunk.keys())[0] if chunk else None
+                yield chunk, node_name
+
     def begin_checkpoint(self, company_name, trade_date, asset_type: str = "stock") -> str | None:
         """Recompile the graph with a per-ticker checkpointer and return the
         ``thread_id`` to inject into the stream/invoke ``config`` (or ``None``

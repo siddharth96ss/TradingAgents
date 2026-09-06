@@ -21,6 +21,41 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# Maps graph node names to (friendly stage name, report group) for /report
+NODE_STAGE_MAP = {
+    "Market Analyst":          ("Market Analyst",       "analysts"),
+    "Msg Clear Market":       (None,                   None),
+    "tools_market":           (None,                   None),
+    "Sentiment Analyst":      ("Sentiment Analyst",    "analysts"),
+    "Msg Clear Sentiment":    (None,                   None),
+    "tools_social":           (None,                   None),
+    "News Analyst":           ("News Analyst",         "analysts"),
+    "Msg Clear News":         (None,                   None),
+    "tools_news":             (None,                   None),
+    "Fundamentals Analyst":   ("Fundamentals Analyst", "analysts"),
+    "Msg Clear Fundamentals": (None,                   None),
+    "tools_fundamentals":     (None,                   None),
+    "Bull Researcher":        ("Bull/Bear Debate",     "research"),
+    "Bear Researcher":        ("Bull/Bear Debate",     "research"),
+    "Research Manager":       ("Research Decision",    "research"),
+    "Trader":                 ("Trader",               "trading"),
+    "Aggressive Analyst":     ("Risk Debate",          "risk"),
+    "Conservative Analyst":   ("Risk Debate",          "risk"),
+    "Neutral Analyst":        ("Risk Debate",          "risk"),
+    "Portfolio Manager":      ("Portfolio Manager",    "portfolio"),
+}
+
+# Maps report groups to the state keys they produce
+GROUP_REPORT_KEYS = {
+    "analysts": ["market_report", "sentiment_report", "news_report", "fundamentals_report"],
+    "research": ["investment_debate_state"],
+    "trading":  ["trader_investment_plan"],
+    "risk":     ["risk_debate_state"],
+    "portfolio": ["final_trade_decision"],
+}
+
+STAGE_ORDER = ["analysts", "research", "trading", "risk", "portfolio"]
+
 
 def _ensure_indian_suffix(ticker: str) -> str:
     """Append .NS suffix to bare Indian stock tickers for Yahoo Finance.
@@ -136,6 +171,63 @@ def _save_stock_report(ticker: str, final_state: dict, signal: str, config: dict
     except Exception as exc:
         logger.warning("Could not save report for %s: %s", ticker, exc)
         return None
+
+
+def _save_partial_state(ticker: str, partial_state: dict, config: dict):
+    """Write partial state to disk so /report can read it mid-analysis."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    partial_dir = Path(config["results_dir"]) / "daily" / today
+    partial_dir.mkdir(parents=True, exist_ok=True)
+    partial_path = partial_dir / f"{ticker}_partial.json"
+
+    # Only write non-empty fields
+    serializable = {}
+    for key in ("market_report", "sentiment_report", "news_report",
+                "fundamentals_report", "investment_debate_state",
+                "trader_investment_plan", "risk_debate_state",
+                "final_trade_decision"):
+        val = partial_state.get(key)
+        if val:
+            serializable[key] = val
+
+    with open(partial_path, "w", encoding="utf-8") as f:
+        json.dump(serializable, f, indent=2, default=str)
+    return partial_path
+
+
+def _get_completed_groups(partial_state: dict) -> list[str]:
+    """Return list of completed report groups based on state keys."""
+    completed = []
+    for group, keys in GROUP_REPORT_KEYS.items():
+        if group == "analysts":
+            # All 4 analyst reports must be present to mark analysts as complete
+            if all(partial_state.get(k) for k in keys):
+                completed.append(group)
+        elif group == "research":
+            debate = partial_state.get("investment_debate_state", {})
+            if debate and (debate.get("judge_decision") or debate.get("bull_history")):
+                completed.append(group)
+        elif group == "risk":
+            risk = partial_state.get("risk_debate_state", {})
+            if risk and (risk.get("judge_decision") or risk.get("aggressive_history")):
+                completed.append(group)
+        elif group == "portfolio":
+            if partial_state.get("final_trade_decision"):
+                completed.append(group)
+        else:
+            if partial_state.get(keys[0]):
+                completed.append(group)
+    return completed
+
+
+def _current_stage_name(completed_groups: list[str]) -> str:
+    """Return the friendly name of the current stage being worked on."""
+    for group in STAGE_ORDER:
+        if group not in completed_groups:
+            stage_entries = [(k, v[0]) for k, v in NODE_STAGE_MAP.items() if v[1] == group and v[0]]
+            if stage_entries:
+                return stage_entries[0][1]
+    return "Complete"
 
 
 def _log_analyst_reports(final_state: dict, ticker: str):
@@ -298,11 +390,55 @@ def run_daily_scan(
         # Update current_stock for live status
         progress["current_stock"] = ticker
         progress["current_index"] = i
+        # Update per-stock entry
+        if "stocks" not in progress:
+            progress["stocks"] = {}
+        progress["stocks"][ticker] = {
+            "status": "in_progress",
+            "stage": "Starting...",
+            "completed_groups": [],
+            "elapsed_seconds": 0,
+        }
         _save_progress(progress_path, progress)
 
         try:
-            final_state, signal = ta.propagate(ticker, today)
+            # Use streaming to capture partial state for /report
+            partial_state = {}
+            final_state = None
+            for chunk, node_name in ta.stream_propagate(ticker, today):
+                # Merge chunk into partial state
+                for key, val in chunk.items():
+                    if val is not None:
+                        partial_state[key] = val
+
+                # Track stage progress
+                if node_name and node_name in NODE_STAGE_MAP:
+                    stage_name, group = NODE_STAGE_MAP[node_name]
+                    if stage_name:
+                        logger.info("  [Stage] %s — %s", ticker, stage_name)
+                    # Write partial state after each meaningful node
+                    if group:
+                        _save_partial_state(ticker, partial_state, config)
+                        completed = _get_completed_groups(partial_state)
+                        current = _current_stage_name(completed)
+                        progress["stocks"][ticker]["stage"] = current
+                        progress["stocks"][ticker]["completed_groups"] = completed
+                        progress["stocks"][ticker]["elapsed_seconds"] = round(time.time() - start, 1)
+                        _save_progress(progress_path, progress)
+
+            # Streaming done — partial_state is now the final state
+            final_state = partial_state
+            signal = ta.process_signal(final_state.get("final_trade_decision", ""))
             elapsed = time.time() - start
+
+            # Store decision for memory log (like _run_graph does)
+            ta.memory_log.store_decision(
+                ticker=ticker,
+                trade_date=today,
+                final_trade_decision=final_state.get("final_trade_decision", ""),
+            )
+            # Clear checkpoint on success
+            ta.clear_checkpoint_on_success(ticker, today)
 
             _log_analyst_reports(final_state, ticker)
             _log_debate_outcomes(final_state, ticker)
@@ -333,6 +469,15 @@ def run_daily_scan(
             report_path = _save_stock_report(ticker, final_state, signal, config)
 
             progress["analyzed"].append(ticker)
+            # Mark stock as completed in progress
+            if "stocks" in progress and ticker in progress["stocks"]:
+                progress["stocks"][ticker]["status"] = "completed"
+                progress["stocks"][ticker]["signal"] = signal
+                progress["stocks"][ticker]["stage"] = "Complete"
+                progress["stocks"][ticker]["completed_groups"] = STAGE_ORDER[:]
+                progress["stocks"][ticker]["elapsed_seconds"] = round(elapsed, 1)
+                if report_path:
+                    progress["stocks"][ticker]["report_path"] = str(report_path)
             logger.info("--- %s RESULT: %s (%.1fs) ---", ticker, signal, elapsed)
             if report_path:
                 logger.info("  Report saved: %s", report_path)
@@ -357,6 +502,12 @@ def run_daily_scan(
             logger.error(traceback.format_exc())
             progress["errors"].append(error_msg)
             progress["analyzed"].append(ticker)
+            # Mark stock as error in progress
+            if "stocks" in progress and ticker in progress["stocks"]:
+                progress["stocks"][ticker]["status"] = "error"
+                progress["stocks"][ticker]["stage"] = "Failed"
+                progress["stocks"][ticker]["elapsed_seconds"] = round(elapsed, 1)
+                progress["stocks"][ticker]["error"] = error_msg
             send_error(error_msg, level="warning")
 
         _save_progress(progress_path, progress)

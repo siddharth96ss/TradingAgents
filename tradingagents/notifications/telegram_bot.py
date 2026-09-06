@@ -18,6 +18,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -134,6 +135,7 @@ def _cmd_start() -> str:
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "Commands:\n"
         "  /status — Today's scan overview\n"
+        "  /report — View stock reports\n"
         "  /signals — Buy/overweight signals\n"
         "  /errors — Any errors from last scan\n"
         "  /last — Details of last analyzed stock\n"
@@ -141,6 +143,287 @@ def _cmd_start() -> str:
         "  /run — Trigger a scan now\n"
         "  /help — Show this message"
     )
+
+
+def _build_report_keyboard(stocks: list[dict]) -> str:
+    """Build inline keyboard JSON for stock selection."""
+    import json as _json
+    buttons = []
+    for stock in stocks:
+        ticker = stock["ticker"]
+        status = stock.get("status", "pending")
+        if status == "completed":
+            icon = "✅"
+            signal = stock.get("signal", "")
+            label = f"{icon} {ticker}" + (f" — {signal}" if signal else "")
+        elif status == "in_progress":
+            icon = "🔄"
+            stage = stock.get("stage", "In Progress")
+            label = f"{icon} {ticker} — {stage}"
+        else:
+            icon = "⏳"
+            label = f"{icon} {ticker}"
+        buttons.append([{"text": label, "callback_data": f"report:{ticker}"}])
+    return _json.dumps({"inline_keyboard": buttons})
+
+
+def _get_stock_list(progress: dict) -> list[dict]:
+    """Build ordered stock list from progress data."""
+    stocks_data = progress.get("stocks", {})
+    analyzed = progress.get("analyzed", [])
+    current_stock = progress.get("current_stock")
+
+    # Build list: completed first (in order), then in-progress, then remaining
+    result = []
+    seen = set()
+
+    # Completed stocks (in analysis order)
+    for ticker in analyzed:
+        if ticker in stocks_data:
+            result.append({"ticker": ticker, **stocks_data[ticker]})
+            seen.add(ticker)
+
+    # Current in-progress stock
+    if current_stock and current_stock not in seen:
+        if current_stock in stocks_data:
+            result.append({"ticker": current_stock, **stocks_data[current_stock]})
+        else:
+            result.append({"ticker": current_stock, "status": "in_progress", "stage": "Starting..."})
+        seen.add(current_stock)
+
+    # Pending stocks (from total_stocks if available, otherwise from analyzed list gap)
+    total = progress.get("total_stocks", 0)
+    if total > len(seen):
+        # We don't know the pending tickers until they start, show count
+        pending_count = total - len(seen)
+        for i in range(pending_count):
+            ticker = f"Pending #{i+1}"
+            result.append({"ticker": ticker, "status": "pending"})
+            seen.add(ticker)
+
+    return result
+
+
+def _cmd_report(token: str, chat_id: str, args: str = "") -> None:
+    """Handle /report command — show stock picker or send specific report."""
+    progress = _load_progress(_today())
+    stocks = _get_stock_list(progress)
+
+    if not stocks:
+        _send(token, chat_id, f"📭 No stocks analyzed yet today ({_today()}).\n\nStart a scan with /run.")
+        return
+
+    # If args provided, try to find and send report for that stock
+    if args:
+        ticker = args.strip().upper()
+        # Find matching stock
+        matched = None
+        for s in stocks:
+            if s["ticker"].upper() == ticker or s["ticker"].upper().startswith(ticker):
+                matched = s
+                break
+
+        if not matched:
+            available = ", ".join(s["ticker"] for s in stocks if s["status"] != "pending")
+            _send(token, chat_id, f"❌ {ticker} not found.\n\nAvailable: {available}")
+            return
+
+        _send_stock_report(token, chat_id, matched)
+        return
+
+    # Show stock picker with inline keyboard
+    header = f"📋 <b>Today's Stocks ({_today()})</b>\nSelect a stock to view its report:"
+    keyboard = _build_report_keyboard(stocks)
+    from tradingagents.notifications.telegram import send_message_with_keyboard
+    send_message_with_keyboard(header, keyboard)
+
+
+def _send_stock_report(token: str, chat_id: str, stock: dict) -> None:
+    """Send a stock's report as a file with a summary message."""
+    ticker = stock["ticker"]
+    status = stock.get("status", "pending")
+
+    if status == "pending":
+        _send(token, chat_id, f"⏳ {ticker} has not been analyzed yet.")
+        return
+
+    if status == "error":
+        error = stock.get("error", "Unknown error")
+        _send(token, chat_id, f"❌ {ticker} analysis failed:\n{error[:300]}")
+        return
+
+    # Build summary message
+    signal = stock.get("signal", "")
+    stage = stock.get("stage", "")
+    elapsed = stock.get("elapsed_seconds", 0)
+    completed_groups = stock.get("completed_groups", [])
+
+    # Stage status icons
+    stage_icons = {
+        "analysts": "Analysts",
+        "research": "Research",
+        "trading": "Trading",
+        "risk": "Risk",
+        "portfolio": "Portfolio",
+    }
+    status_line = ""
+    for group, label in stage_icons.items():
+        if group in completed_groups:
+            status_line += f"✅ {label} "
+        elif status == "in_progress" and group == (stock.get("stage", "").lower().split()[0] if stock.get("stage") else ""):
+            status_line += f"🔄 {label} "
+        else:
+            status_line += f"⏳ {label} "
+
+    summary_lines = [
+        f"📄 <b>{ticker} Report</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Status: {'✅ Completed' if status == 'completed' else '🔄 In Progress'}",
+    ]
+    if signal:
+        summary_lines.append(f"Signal: {signal}")
+    if elapsed:
+        summary_lines.append(f"Time: {elapsed:.0f}s")
+    summary_lines.append(f"\n{status_line}")
+
+    _send(token, chat_id, "\n".join(summary_lines))
+
+    # Generate and send report file
+    report_file = _generate_report_file(ticker, stock)
+    if report_file:
+        from tradingagents.notifications.telegram import send_document
+        caption = f"{ticker} — {'Complete' if status == 'completed' else f'Partial ({len(completed_groups)}/5 stages)'}"
+        send_document(str(report_file), caption=caption)
+        # Clean up temp file
+        try:
+            report_file.unlink()
+        except Exception:
+            pass
+
+
+def _generate_report_file(ticker: str, stock: dict) -> Optional[Path]:
+    """Generate a markdown report file from partial or complete state."""
+    status = stock.get("status", "pending")
+    today = _today()
+
+    # Try to load partial state first (works for both complete and in-progress)
+    partial_path = _results_dir() / "daily" / f"{ticker}_partial.json"
+    partial_state = {}
+    if partial_path.exists():
+        try:
+            with open(partial_path, encoding="utf-8") as f:
+                partial_state = json.load(f)
+        except Exception:
+            pass
+
+    # For completed stocks, also try loading the full report
+    if status == "completed":
+        report_dir = _results_dir() / "daily" / today / ticker
+        complete_report = report_dir / "complete_report.md"
+        if complete_report.exists():
+            # Read and return as temp file
+            content = complete_report.read_text(encoding="utf-8")
+            tmp = Path(tempfile.mktemp(suffix=".md", prefix=f"{ticker}_"))
+            tmp.write_text(content, encoding="utf-8")
+            return tmp
+
+    # Generate report from partial state
+    if not partial_state:
+        return None
+
+    sections = []
+    completed_groups = stock.get("completed_groups", [])
+
+    # Header
+    header = f"# Trading Analysis Report: {ticker}\n\n"
+    header += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    if status == "completed":
+        header += "Status: Completed\n\n"
+    else:
+        header += f"Status: In Progress ({len(completed_groups)}/5 stages complete)\n\n"
+
+    # I. Analyst Team Reports
+    analyst_parts = []
+    for name, key in [("Market Analyst", "market_report"),
+                      ("Sentiment Analyst", "sentiment_report"),
+                      ("News Analyst", "news_report"),
+                      ("Fundamentals Analyst", "fundamentals_report")]:
+        if partial_state.get(key):
+            analyst_parts.append((name, partial_state[key]))
+    if analyst_parts:
+        content = "\n\n".join(f"### {name}\n{text}" for name, text in analyst_parts)
+        sections.append(f"## I. Analyst Team Reports\n\n{content}")
+
+    # II. Research Team Decision
+    debate = partial_state.get("investment_debate_state", {})
+    if debate:
+        research_parts = []
+        if debate.get("bull_history"):
+            research_parts.append(("Bull Researcher", debate["bull_history"]))
+        if debate.get("bear_history"):
+            research_parts.append(("Bear Researcher", debate["bear_history"]))
+        if debate.get("judge_decision"):
+            research_parts.append(("Research Manager", debate["judge_decision"]))
+        if research_parts:
+            content = "\n\n".join(f"### {name}\n{text}" for name, text in research_parts)
+            sections.append(f"## II. Research Team Decision\n\n{content}")
+
+    # III. Trading Team Plan
+    if partial_state.get("trader_investment_plan"):
+        sections.append(f"## III. Trading Team Plan\n\n### Trader\n{partial_state['trader_investment_plan']}")
+
+    # IV. Risk Management
+    risk = partial_state.get("risk_debate_state", {})
+    if risk:
+        risk_parts = []
+        if risk.get("aggressive_history"):
+            risk_parts.append(("Aggressive Analyst", risk["aggressive_history"]))
+        if risk.get("conservative_history"):
+            risk_parts.append(("Conservative Analyst", risk["conservative_history"]))
+        if risk.get("neutral_history"):
+            risk_parts.append(("Neutral Analyst", risk["neutral_history"]))
+        if risk_parts:
+            content = "\n\n".join(f"### {name}\n{text}" for name, text in risk_parts)
+            sections.append(f"## IV. Risk Management Team Decision\n\n{content}")
+
+        if risk.get("judge_decision"):
+            sections.append(f"## V. Portfolio Manager Decision\n\n### Portfolio Manager\n{risk['judge_decision']}")
+
+    if not sections:
+        return None
+
+    report_content = header + "\n\n".join(sections)
+    tmp = Path(tempfile.mktemp(suffix=".md", prefix=f"{ticker}_"))
+    tmp.write_text(report_content, encoding="utf-8")
+    return tmp
+
+
+def _handle_callback(token: str, chat_id: str, callback_query: dict) -> None:
+    """Handle inline keyboard button taps."""
+    from tradingagents.notifications.telegram import answer_callback
+
+    query_id = callback_query["id"]
+    data = callback_query.get("data", "")
+
+    # Answer callback to dismiss loading spinner
+    answer_callback(query_id)
+
+    if data.startswith("report:"):
+        ticker = data.split(":", 1)[1]
+        progress = _load_progress(_today())
+        stocks = _get_stock_list(progress)
+
+        # Find the stock
+        matched = None
+        for s in stocks:
+            if s["ticker"] == ticker:
+                matched = s
+                break
+
+        if matched:
+            _send_stock_report(token, chat_id, matched)
+        else:
+            _send(token, chat_id, f"❌ {ticker} not found in today's data.")
 
 
 def _cmd_status() -> str:
@@ -361,26 +644,31 @@ def _cmd_run() -> str:
 
 
 def _handle_command(command: str, token: str, chat_id: str) -> None:
-    command = command.strip().lower()
+    parts = command.strip().split(maxsplit=1)
+    cmd = parts[0].lower()
+    args = parts[1] if len(parts) > 1 else ""
 
-    if command in ("/start", "/help"):
+    if cmd in ("/start", "/help"):
         text = _cmd_start()
-    elif command == "/status":
+    elif cmd == "/status":
         text = _cmd_status()
-    elif command == "/signals":
+    elif cmd == "/report":
+        _cmd_report(token, chat_id, args)
+        return
+    elif cmd == "/signals":
         text = _cmd_signals()
-    elif command == "/errors":
+    elif cmd == "/errors":
         text = _cmd_errors()
-    elif command == "/last":
+    elif cmd == "/last":
         text = _cmd_last()
-    elif command == "/history":
+    elif cmd == "/history":
         text = _cmd_history()
-    elif command == "/run":
+    elif cmd == "/run":
         text = _cmd_run()
         _send(token, chat_id, text)
         return
     else:
-        text = f"Unknown command: {command}\n\nType /help for available commands."
+        text = f"Unknown command: {cmd}\n\nType /help for available commands."
 
     _send(token, chat_id, text)
 
@@ -430,6 +718,17 @@ def run_bot():
             updates = _get_updates(token, offset)
             for update in updates:
                 offset = update["update_id"] + 1
+
+                # Handle callback queries (inline keyboard button taps)
+                if "callback_query" in update:
+                    callback = update["callback_query"]
+                    sender_chat_id = str(callback.get("message", {}).get("chat", {}).get("id", ""))
+                    if sender_chat_id == chat_id:
+                        logger.info("Callback from %s: %s", sender_chat_id, callback.get("data"))
+                        _handle_callback(token, chat_id, callback)
+                    continue
+
+                # Handle regular messages
                 message = update.get("message", {})
                 text = message.get("text", "")
                 if text and text.startswith("/"):

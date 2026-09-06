@@ -105,6 +105,79 @@ def send_error(message: str, level: str = "warning") -> bool:
     return _send(text)
 
 
+def send_document(file_path: str, caption: str = "") -> bool:
+    """Send a file as a Telegram document."""
+    token, chat_id = _get_config()
+    if not token or not chat_id:
+        logger.warning("Telegram not configured — skipping notification")
+        return False
+
+    url = f"{_BASE_URL.format(token=token)}/sendDocument"
+    try:
+        with open(file_path, "rb") as f:
+            resp = requests.post(
+                url,
+                data={"chat_id": chat_id, "caption": caption},
+                files={"document": f},
+                timeout=30,
+            )
+        if resp.status_code != 200:
+            logger.error("Telegram API error %s: %s", resp.status_code, resp.text)
+            return False
+        return True
+    except Exception as exc:
+        logger.error("Failed to send document: %s", exc)
+        return False
+
+
+def send_message_with_keyboard(
+    text: str, keyboard: str, parse_mode: str = "HTML"
+) -> bool:
+    """Send a message with an inline keyboard."""
+    token, chat_id = _get_config()
+    if not token or not chat_id:
+        logger.warning("Telegram not configured — skipping notification")
+        return False
+
+    url = f"{_BASE_URL.format(token=token)}/sendMessage"
+    try:
+        resp = requests.post(
+            url,
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": parse_mode,
+                "reply_markup": keyboard,
+            },
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.error("Telegram API error %s: %s", resp.status_code, resp.text)
+            return False
+        return True
+    except Exception as exc:
+        logger.error("Failed to send message with keyboard: %s", exc)
+        return False
+
+
+def answer_callback(callback_query_id: str) -> bool:
+    """Answer a callback query to dismiss the loading spinner."""
+    token, _ = _get_config()
+    if not token:
+        return False
+
+    url = f"{_BASE_URL.format(token=token)}/answerCallbackQuery"
+    try:
+        resp = requests.post(
+            url,
+            json={"callback_query_id": callback_query_id},
+            timeout=10,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
 def send_daily_summary(
     stocks_analyzed: int,
     buy_signals: Optional[list[dict]] = None,
