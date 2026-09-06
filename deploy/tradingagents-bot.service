@@ -1,0 +1,16 @@
+[Unit]
+Description=TradingAgents Telegram Bot
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/tradingagents
+ExecStart=/usr/bin/python3 -m tradingagents.notifications.telegram_bot
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

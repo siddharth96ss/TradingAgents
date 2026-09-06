@@ -49,6 +49,7 @@ bedrock = [
 
 [project.scripts]
 tradingagents = "cli.main:app"
+tradingagents-bot = "tradingagents.notifications.telegram_bot:run_bot"
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*"]
