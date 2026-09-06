@@ -38,8 +38,11 @@ def _get_config():
 
 
 def _results_dir() -> Path:
-    from tradingagents.default_config import DEFAULT_CONFIG
-    return Path(DEFAULT_CONFIG["results_dir"])
+    home = Path.home()
+    env_dir = os.getenv("TRADINGAGENTS_RESULTS_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return home / ".tradingagents" / "logs"
 
 
 def _send(token: str, chat_id: str, text: str, parse_mode: str = "HTML") -> bool:
