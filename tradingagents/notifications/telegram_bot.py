@@ -45,6 +45,15 @@ def _results_dir() -> Path:
     return home / ".tradingagents" / "logs"
 
 
+def _project_dir() -> Path:
+    """Path to the TradingAgents repo on the host."""
+    env_dir = os.getenv("TRADINGAGENTS_PROJECT_DIR")
+    if env_dir:
+        return Path(env_dir)
+    # Default: ~/tradingagents (as deployed by vm-init.sh)
+    return Path.home() / "tradingagents"
+
+
 def _send(token: str, chat_id: str, text: str, parse_mode: str = "HTML") -> bool:
     url = f"{_BASE_URL.format(token=token)}/sendMessage"
     try:
@@ -88,6 +97,35 @@ def _load_progress(date: str) -> dict:
     return {"analyzed": [], "signals": [], "errors": [], "started_at": None}
 
 
+def _is_scan_running() -> bool:
+    """Check if the batch runner is currently executing."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "tradingagents.batch_runner"],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _scan_uptime(progress: dict) -> str:
+    """Calculate elapsed time since scan started."""
+    started = progress.get("started_at")
+    if not started:
+        return ""
+    try:
+        start_dt = datetime.fromisoformat(started)
+        elapsed = (datetime.now() - start_dt).total_seconds()
+        mins, secs = divmod(int(elapsed), 60)
+        hours, mins = divmod(mins, 60)
+        if hours > 0:
+            return f"{hours}h {mins}m"
+        return f"{mins}m {secs}s"
+    except Exception:
+        return ""
+
+
 def _cmd_start() -> str:
     return (
         "🟢 <b>TradingAgents Bot</b>\n"
@@ -105,23 +143,70 @@ def _cmd_start() -> str:
 
 def _cmd_status() -> str:
     progress = _load_progress(_today())
-    analyzed = len(progress.get("analyzed", []))
-    signals = len(progress.get("signals", []))
-    errors = len(progress.get("errors", []))
-    started = progress.get("started_at") or "Not started yet"
-    completed = progress.get("completed_at") or "Not completed"
+    analyzed = progress.get("analyzed", [])
+    signals = progress.get("signals", [])
+    errors = progress.get("errors", [])
+    started = progress.get("started_at")
+    completed = progress.get("completed_at")
+    running = _is_scan_running()
 
+    total_stocks = progress.get("total_stocks", 0)
+    current_stock = progress.get("current_stock")
+    current_index = progress.get("current_index", 0)
+
+    # Determine status line
+    if running:
+        status_icon = "🔄 <b>SCAN IN PROGRESS</b>"
+    elif completed:
+        status_icon = "✅ <b>Scan completed</b>"
+    elif started:
+        status_icon = "⚠️ <b>Scan interrupted</b>"
+    else:
+        status_icon = "💤 No scan today"
+
+    # Elapsed time
+    uptime = _scan_uptime(progress)
+    elapsed_line = f"Elapsed: {uptime}\n" if uptime else ""
+
+    # Current stock
+    current_line = ""
+    if running and current_stock:
+        idx = f"{current_index}/{total_stocks}" if total_stocks else ""
+        current_line = f"Analyzing: {current_stock} ({idx})\n"
+
+    # Progress bar
+    if total_stocks > 0:
+        progress_pct = len(analyzed) / total_stocks * 100
+        bar_len = 10
+        filled = int(bar_len * min(progress_pct, 100) / 100)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        progress_line = f"[{bar}] {len(analyzed)}/{total_stocks}\n"
+    elif running:
+        progress_line = f"Analyzing... {len(analyzed)} done\n"
+    else:
+        progress_line = ""
+
+    # Format timestamps
     def _fmt(val: str) -> str:
-        return val[:19] if val and val not in ("Not started yet", "Not completed") else val
+        if not val:
+            return "—"
+        return val[:19]
+
+    started_str = _fmt(started) if started else "—"
+    completed_str = _fmt(completed) if completed else "In progress..." if running else "—"
 
     return (
         f"📊 <b>Today's Scan — {_today()}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Stocks Analyzed: {analyzed}\n"
-        f"Buy Signals: {signals}\n"
-        f"Errors: {errors}\n"
-        f"Started: {_fmt(started)}\n"
-        f"Completed: {_fmt(completed)}"
+        f"{status_icon}\n"
+        f"{elapsed_line}"
+        f"{current_line}"
+        f"{progress_line}"
+        f"Analyzed: {len(analyzed)}\n"
+        f"Buy Signals: {len(signals)}\n"
+        f"Errors: {len(errors)}\n"
+        f"Started: {started_str}\n"
+        f"Completed: {completed_str}"
     )
 
 
@@ -243,11 +328,32 @@ def _cmd_history() -> str:
 
 
 def _cmd_run() -> str:
-    """Trigger a manual scan (non-blocking)."""
+    """Trigger a manual scan (non-blocking) using Python directly."""
+    if _is_scan_running():
+        return "⏳ A scan is already running. Check /status for progress."
+
+    project_dir = _project_dir()
+    log_dir = _results_dir() / "daily" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    log_file = log_dir / f"manual_{today}.log"
+
+    # Source .env and run batch runner directly (like cron-wrapper.sh does)
+    subprocess.Popen(
+        f"source {project_dir}/.env && cd {project_dir} && "
+        f"python3 -m tradingagents.batch_runner >> {log_file} 2>&1",
+        shell=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        executable="/bin/bash",
+    )
+
     return (
-        "🚀 Starting manual scan...\n"
-        "This may take a while. You'll get a Telegram alert when buy signals are found.\n"
-        "Check /status for progress."
+        "🚀 <b>Manual scan started</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Running Python batch runner directly.\n"
+        "Check /status for live progress.\n"
+        f"Logs: {log_file}"
     )
 
 
@@ -269,13 +375,6 @@ def _handle_command(command: str, token: str, chat_id: str) -> None:
     elif command == "/run":
         text = _cmd_run()
         _send(token, chat_id, text)
-        # Trigger scan in background
-        subprocess.Popen(
-            ["docker", "compose", "-f", "/home/ubuntu/tradingagents/docker-compose.yml",
-             "run", "--rm", "tradingagents-batch"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
         return
     else:
         text = f"Unknown command: {command}\n\nType /help for available commands."

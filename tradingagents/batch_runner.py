@@ -263,6 +263,10 @@ def run_daily_scan(
 
     logger.info("Will analyze %d stocks: %s", len(stocks), stocks)
 
+    # Write total_stocks to progress for status display
+    progress["total_stocks"] = len(stocks)
+    _save_progress(progress_path, progress)
+
     # --- Dry run: show what would be analyzed and stop ---
     if dry_run:
         logger.info("=== DRY RUN — not analyzing ===")
@@ -290,6 +294,11 @@ def run_daily_scan(
         logger.info("[%d/%d] ANALYZING: %s", i, len(stocks), ticker)
         logger.info("=" * 60)
         start = time.time()
+
+        # Update current_stock for live status
+        progress["current_stock"] = ticker
+        progress["current_index"] = i
+        _save_progress(progress_path, progress)
 
         try:
             final_state, signal = ta.propagate(ticker, today)
@@ -354,6 +363,8 @@ def run_daily_scan(
 
     # --- Step 3: End-of-day summary ---
     progress["completed_at"] = datetime.now().isoformat()
+    progress["current_stock"] = None
+    progress["current_index"] = None
     _save_progress(progress_path, progress)
 
     total_analyzed = len(progress["analyzed"])
