@@ -208,19 +208,34 @@ def run_daily_scan(
         today, len(already_done),
     )
 
-    # --- Step 1: Get stocks from screener ---
+    # --- Step 1: Get stocks from scanner (multi-signal first, sector momentum fallback) ---
+    stocks = []
     try:
-        stocks = get_todays_stocks(
-            exclude_tickers=list(already_done),
+        from tradingagents.screener.stock_scanner import get_buy_list
+        buy_list = get_buy_list(
+            universe=config.get("scan_universe", "nifty100"),
+            min_score=2.0,
+            max_stocks=max_daily,
         )
+        stocks = [item["ticker"] for item in buy_list]
+        logger.info("Multi-signal scanner returned %d BUY+ stocks", len(stocks))
     except Exception as exc:
-        msg = f"Screener failed: {exc}"
-        logger.error(msg)
-        send_error(msg, level="critical")
-        return
+        logger.warning("Multi-signal scanner failed, falling back to sector momentum: %s", exc)
 
     if not stocks:
-        msg = "Screener returned 0 stocks. Check sector data or filters."
+        try:
+            stocks = get_todays_stocks(
+                exclude_tickers=list(already_done),
+            )
+            logger.info("Sector momentum fallback returned %d stocks", len(stocks))
+        except Exception as exc:
+            msg = f"Both scanners failed: {exc}"
+            logger.error(msg)
+            send_error(msg, level="critical")
+            return
+
+    if not stocks:
+        msg = "Both scanners returned 0 stocks."
         logger.warning(msg)
         if not dry_run:
             send_error(msg, level="warning")
