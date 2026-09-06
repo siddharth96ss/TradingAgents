@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://api.telegram.org/bot{token}"
 _POLL_TIMEOUT = 30  # long-poll timeout in seconds
 _COOLDOWN = 2  # seconds between command processing
+_PID_FILE = Path("/tmp/tradingagents_bot.pid")
 
 
 def _get_config():
@@ -392,12 +394,31 @@ def run_bot():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    # Prevent duplicate instances via PID file lock
+    if _PID_FILE.exists():
+        try:
+            old_pid = int(_PID_FILE.read_text().strip())
+            os.kill(old_pid, 0)  # Check if process is alive
+            logger.error("Bot already running (PID %d). Exiting.", old_pid)
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass  # Old process dead, ok to continue
+    _PID_FILE.write_text(str(os.getpid()))
+
+    def _cleanup(*args):
+        _PID_FILE.unlink(missing_ok=True)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _cleanup)
+    signal.signal(signal.SIGINT, _cleanup)
+
     token, chat_id = _get_config()
     if not token or not chat_id:
         logger.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
+        _PID_FILE.unlink(missing_ok=True)
         sys.exit(1)
 
-    logger.info("Bot starting. Chat ID: %s", chat_id)
+    logger.info("Bot starting. Chat ID: %s, PID: %d", chat_id, os.getpid())
 
     # Send startup message
     _send(token, chat_id, "🟢 <b>TradingAgents Bot</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\nOnline. Type /help for commands.")
@@ -420,6 +441,7 @@ def run_bot():
         except KeyboardInterrupt:
             logger.info("Bot stopped.")
             _send(token, chat_id, "🔴 <b>TradingAgents Bot</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\nOffline.")
+            _PID_FILE.unlink(missing_ok=True)
             break
         except Exception as exc:
             logger.error("Loop error: %s", exc)
