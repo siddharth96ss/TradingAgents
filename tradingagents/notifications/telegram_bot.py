@@ -340,9 +340,10 @@ def _cmd_run() -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     log_file = log_dir / f"manual_{today}.log"
 
-    # Source .env and run batch runner directly (like cron-wrapper.sh does)
+    # Source .env, set PYTHONPATH, and run batch runner directly (like cron-wrapper.sh does)
     subprocess.Popen(
         f"source {project_dir}/.env && cd {project_dir} && "
+        f"PYTHONPATH={project_dir}:$PYTHONPATH "
         f"python3 -m tradingagents.batch_runner >> {log_file} 2>&1",
         shell=True,
         stdout=subprocess.DEVNULL,
