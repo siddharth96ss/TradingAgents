@@ -70,8 +70,8 @@ OPENROUTER_API_KEY=${OPENROUTER_KEY}
 
 # TradingAgents config
 TRADINGAGENTS_LLM_PROVIDER=openrouter
-TRADINGAGENTS_DEEP_THINK_LLM=minimax/minimax-m3
-TRADINGAGENTS_QUICK_THINK_LLM=minimax/minimax-m3
+TRADINGAGENTS_DEEP_THINK_LLM=minimax/minimax-m3:free
+TRADINGAGENTS_QUICK_THINK_LLM=minimax/minimax-m3:free
 
 # Telegram notifications
 TELEGRAM_BOT_TOKEN=${TG_TOKEN}
