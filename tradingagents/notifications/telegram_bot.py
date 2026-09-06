@@ -108,8 +108,11 @@ def _cmd_status() -> str:
     analyzed = len(progress.get("analyzed", []))
     signals = len(progress.get("signals", []))
     errors = len(progress.get("errors", []))
-    started = progress.get("started_at", "Not started yet")
-    completed = progress.get("completed_at", "Not completed")
+    started = progress.get("started_at") or "Not started yet"
+    completed = progress.get("completed_at") or "Not completed"
+
+    def _fmt(val: str) -> str:
+        return val[:19] if val and val not in ("Not started yet", "Not completed") else val
 
     return (
         f"📊 <b>Today's Scan — {_today()}</b>\n"
@@ -117,8 +120,8 @@ def _cmd_status() -> str:
         f"Stocks Analyzed: {analyzed}\n"
         f"Buy Signals: {signals}\n"
         f"Errors: {errors}\n"
-        f"Started: {started[:19] if started != 'Not started yet' else started}\n"
-        f"Completed: {completed[:19] if completed != 'Not completed' else completed}"
+        f"Started: {_fmt(started)}\n"
+        f"Completed: {_fmt(completed)}"
     )
 
 
