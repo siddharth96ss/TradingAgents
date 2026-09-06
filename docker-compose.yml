@@ -8,6 +8,14 @@ services:
     tty: true
     stdin_open: true
 
+  tradingagents-batch:
+    build: .
+    env_file:
+      - .env
+    volumes:
+      - tradingagents_data:/home/appuser/.tradingagents
+    entrypoint: ["python", "-m", "tradingagents.batch_runner"]
+
   ollama:
     image: ollama/ollama:latest
     volumes:
