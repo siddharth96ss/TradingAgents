@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cron wrapper for TradingAgents daily scan.
-# Runs the batch runner inside Docker and sends Telegram alerts on failure.
+# Runs the batch runner with Python and sends Telegram alerts on failure.
 # Logs everything to a daily log file.
 set -uo pipefail
 
@@ -41,12 +41,12 @@ log() {
 
 log "Starting daily scan..."
 
-# Run the batch runner via Docker
-if docker compose -f "$PROJECT_DIR/docker-compose.yml" run --rm tradingagents-batch 2>&1 | tee -a "$LOG_FILE"; then
+# Run the batch runner with Python
+if cd "$PROJECT_DIR" && python3 -m tradingagents.batch_runner 2>&1 | tee -a "$LOG_FILE"; then
     log "Scan completed successfully."
 else
     EXIT_CODE=$?
-    ERROR_MSG="Docker compose exited with code $EXIT_CODE. Check logs: $LOG_FILE"
+    ERROR_MSG="Batch runner exited with code $EXIT_CODE. Check logs: $LOG_FILE"
     log "ERROR: $ERROR_MSG"
     send_telegram_error "$ERROR_MSG"
     exit $EXIT_CODE

@@ -11,26 +11,15 @@ INSTALL_DIR="$HOME/tradingagents"
 echo "=== TradingAgents VM Setup ==="
 
 # 1. System updates
-echo "[1/6] Updating system packages..."
+echo "[1/5] Updating system packages..."
 sudo apt-get update -qq && sudo apt-get upgrade -y -qq
 
-# 2. Install Docker
-echo "[2/6] Installing Docker..."
-if ! command -v docker &>/dev/null; then
-    sudo apt-get install -y -qq docker.io docker-compose-v2
-    sudo systemctl enable --now docker
-    sudo usermod -aG docker "$USER"
-    echo "Docker installed. You may need to log out/in for group changes."
-else
-    echo "Docker already installed."
-fi
+# 2. Install Python, pip, git
+echo "[2/5] Installing Python and git..."
+sudo apt-get install -y -qq python3 python3-pip python3-venv python3-dev git
 
-# 3. Install Python 3.12+ and git
-echo "[3/6] Installing Python and git..."
-sudo apt-get install -y -qq python3 python3-pip python3-venv git
-
-# 4. Clone the repo
-echo "[4/6] Cloning TradingAgents..."
+# 3. Clone the repo
+echo "[3/5] Cloning TradingAgents..."
 if [ -d "$INSTALL_DIR" ]; then
     echo "Directory $INSTALL_DIR already exists — pulling latest."
     cd "$INSTALL_DIR" && git checkout "$BRANCH" && git pull
@@ -39,8 +28,13 @@ else
     cd "$INSTALL_DIR"
 fi
 
+# 4. Install Python dependencies
+echo "[4/5] Installing Python dependencies..."
+pip3 install --break-system-packages -e "$INSTALL_DIR" 2>/dev/null || \
+pip3 install -e "$INSTALL_DIR"
+
 # 5. Create .env from template if it doesn't exist
-echo "[5/6] Setting up .env..."
+echo "[5/5] Setting up .env..."
 if [ ! -f .env ]; then
     cp .env.example .env
     echo ""
@@ -56,13 +50,9 @@ else
     echo ".env already exists."
 fi
 
-# 6. Build Docker image
-echo "[6/6] Building Docker image..."
-docker compose build
-
 echo ""
 echo "=== Setup Complete ==="
 echo "Next steps:"
 echo "  1. Edit .env:  nano $INSTALL_DIR/.env"
-echo "  2. Test run:   cd $INSTALL_DIR && docker compose run --rm tradingagents-batch"
-echo "  3. Install cron: bash $INSTALL_DIR/deploy/install-cron.sh"
+echo "  2. Test run:   cd $INSTALL_DIR && python3 -m tradingagents.batch_runner --dry-run"
+echo "  3. Install cron + bot: bash $INSTALL_DIR/deploy/install-cron.sh && bash $INSTALL_DIR/deploy/install-bot.sh"
