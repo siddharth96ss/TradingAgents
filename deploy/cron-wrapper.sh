@@ -6,6 +6,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+export PYTHONPATH="$PROJECT_DIR:$PYTHONPATH"
 LOG_DIR="$PROJECT_DIR/logs/cron"
 TODAY="$(date +%Y-%m-%d)"
 LOG_FILE="$LOG_DIR/scan_${TODAY}.log"
